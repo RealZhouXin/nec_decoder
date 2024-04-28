@@ -1,7 +1,9 @@
 #pragma once
 
 #include <cstdint>
+#include <map>
 #include <optional>
+#include <string>
 namespace factory {
 namespace ir {
 
@@ -34,6 +36,11 @@ enum class Code : uint8_t {
 };
 
 enum class SymbolType { null, leader, data_0, data_1 };
+inline std::map<SymbolType, std::string> symbol_str{
+    {SymbolType::null, "null"},
+    {SymbolType::data_0, "data_0"},
+    {SymbolType::data_1, "data_1"},
+    {SymbolType::leader, "leader"}};
 enum class Level : uint8_t {
     low = 0,
     high,
@@ -45,22 +52,24 @@ struct Input {
 };
 
 class SymbolParser {
-    enum class ParseSymbolSate {
+    enum class State {
         wait_low,
         wait_high,
     };
 
 public:
+    using Output = std::optional<SymbolType>;
     SymbolParser();
     void reset();
-    std::optional<SymbolType> parse_symbol(Input input);
+    Output parse_symbol(Input input);
 
 private:
-    void wait_low();
-    void wait_high();
+    Output wait_low(Input input);
+    Output wait_high(Input input);
+    void switch_state(State state, int line = 0);
 
 private:
-    ParseSymbolSate state_;
+    State state_;
     uint32_t last_state_duration_cnt_;
 };
 

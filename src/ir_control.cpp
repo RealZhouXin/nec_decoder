@@ -1,15 +1,14 @@
 #include "ir_control.h"
 #include "fmt/color.h"
 #include "fmt/core.h"
-#include "fmt/format.h"
 #include <cstdint>
 #include <optional>
 #include <utility>
 
 using namespace factory::ir;
-constexpr uint32_t T = 560;                          // 脉冲周期
+constexpr uint32_t T = 560;                          // 载波周期
 constexpr uint32_t LEADER_HIGH_LEVEL_PULSE_CNT = 16; // 引导码高电平脉冲个数
-constexpr uint32_t LEADER_LOW_LEVEL_PULSE_CNT = 4; // 引导码低电平脉冲个数
+constexpr uint32_t LEADER_LOW_LEVEL_PULSE_CNT = 8; // 引导码低电平脉冲个数
 constexpr uint32_t DATA_0_HIGH_LEVEL_PULSE_CNT = 1; // 数据0高电平脉冲个数
 constexpr uint32_t DATA_0_LOW_LEVEL_PULSE_CNT = 1; // 数据0低电平脉冲个数
 constexpr uint32_t DATA_1_HIGH_LEVEL_PULSE_CNT = 1; // 数据1高电平脉冲个数
@@ -20,71 +19,73 @@ void clrbit(auto &data, uint8_t bit) { data &= ~(1 << bit); }
 
 // Input
 Input::Input(Level level, uint32_t duration)
-    : level(level), last_state_duration_cnt(duration / T) {}
+    : level(level),
+      last_state_duration_cnt((duration * 1.0 / T) > ((duration / T) + 0.5)
+                                  ? duration / T + 1
+                                  : duration / T) {}
 
 // SymbolParser
-SymbolParser::SymbolParser() : state_(ParseSymbolSate::init) {}
+SymbolParser::SymbolParser() : state_(State::wait_high) {}
 void SymbolParser::reset() {
-    state_ = ParseSymbolSate::init;
+    state_ = State::wait_high;
     last_state_duration_cnt_ = 0;
 }
-std::optional<SymbolType> SymbolParser::parse_symbol(Input input) {
+SymbolParser::Output SymbolParser::parse_symbol(Input input) {
     switch (state_) {
-    case ParseSymbolSate::init:
-        last_state_duration_cnt_ = 0;
-        if (input.level == Level::high) {
-            state_ = ParseSymbolSate::high;
-        } else {
-            fmt::print(fmt::fg(fmt::color::yellow),
-                       "parse symbol input {}({}), line:{}\n", (int)input.level,
-                       input.last_state_duration_cnt, __LINE__);
-            return SymbolType::null;
-        }
-        break;
-    case ParseSymbolSate::low:
-        if (input.level == Level::high) {
-            state_ = ParseSymbolSate::high;
-            switch (input.last_state_duration_cnt) {
-            case LEADER_LOW_LEVEL_PULSE_CNT:
-                if (last_state_duration_cnt_ == LEADER_HIGH_LEVEL_PULSE_CNT)
-                    return SymbolType::leader;
-                break;
-            case DATA_0_LOW_LEVEL_PULSE_CNT:
-                if (last_state_duration_cnt_ == DATA_0_HIGH_LEVEL_PULSE_CNT)
-                    return SymbolType::data_0;
-                break;
-            case DATA_1_LOW_LEVEL_PULSE_CNT:
-                if (last_state_duration_cnt_ == DATA_1_HIGH_LEVEL_PULSE_CNT)
-                    return SymbolType::data_1;
-                break;
-            default:
-                break;
-            }
-        }
-        state_ = ParseSymbolSate::init;
+    case State::wait_high:
+        return wait_high(input);
+    case State::wait_low:
+        return wait_low(input);
+    }
+    return std::nullopt;
+}
+SymbolParser::Output SymbolParser::wait_high(Input input) {
+    if (input.level == Level::high &&
+        (input.last_state_duration_cnt == LEADER_HIGH_LEVEL_PULSE_CNT ||
+         input.last_state_duration_cnt == DATA_0_HIGH_LEVEL_PULSE_CNT ||
+         input.last_state_duration_cnt == DATA_1_HIGH_LEVEL_PULSE_CNT)) {
+        last_state_duration_cnt_ = input.last_state_duration_cnt;
+        switch_state(State::wait_low);
+        return std::nullopt;
+    }
+    return SymbolType::null;
+}
+SymbolParser::Output SymbolParser::wait_low(Input input) {
+    if (input.level != Level::low) {
+        switch_state(State::wait_high);
         return SymbolType::null;
-        break;
-    case ParseSymbolSate::high:
-        if (input.level == Level::low &&
-            (input.last_state_duration_cnt == LEADER_HIGH_LEVEL_PULSE_CNT ||
-             input.last_state_duration_cnt == DATA_0_HIGH_LEVEL_PULSE_CNT ||
-             input.last_state_duration_cnt == DATA_1_HIGH_LEVEL_PULSE_CNT)) {
-            state_ = ParseSymbolSate::low;
-            last_state_duration_cnt_ = input.last_state_duration_cnt;
-        } else {
-            state_ = ParseSymbolSate::init;
-            fmt::print(fmt::fg(fmt::color::yellow),
-                       "parse symbol input {}({}), line:{}\n", (int)input.level,
-                       input.last_state_duration_cnt, __LINE__);
-            return SymbolType::null;
-        }
+    }
+    Output output;
+    if (input.last_state_duration_cnt == LEADER_LOW_LEVEL_PULSE_CNT &&
+        last_state_duration_cnt_ == LEADER_HIGH_LEVEL_PULSE_CNT)
+        output = SymbolType::leader;
+    else if (input.last_state_duration_cnt == DATA_0_LOW_LEVEL_PULSE_CNT &&
+             last_state_duration_cnt_ == DATA_0_HIGH_LEVEL_PULSE_CNT)
+        output = SymbolType::data_0;
+    else if (input.last_state_duration_cnt == DATA_1_LOW_LEVEL_PULSE_CNT &&
+             last_state_duration_cnt_ == DATA_1_HIGH_LEVEL_PULSE_CNT)
+        output = SymbolType::data_1;
+    else
+        output = SymbolType::null;
+    switch_state(State::wait_high);
+    if (output.has_value()) {
+        fmt::print(fmt::fg(fmt::color::yellow), "parse symbol:{}\n",
+                   symbol_str[output.value()]);
+    }
+    return output;
+}
+void SymbolParser::switch_state(State state, int line) {
+    // fmt::print(fmt::fg(fmt::color::green), "symbol parser: {} -> {}\n",
+    //            (int)state_, (int)state);
+    switch (state) {
+    case State::wait_high:
+        last_state_duration_cnt_ = 0;
         break;
     default:
         break;
     }
-    return std::nullopt;
+    state_ = state;
 }
-void SymbolParser::wait_low() {}
 // FrameParser
 FrameParser::FrameParser()
     : state_(FrameParserState::parsing_leader), address_(0), command_(0) {}
@@ -136,12 +137,6 @@ FrameParser::Output FrameParser::parse_leader(Input input) {
     if (symbol.has_value()) {
         if (symbol.value() == SymbolType::leader) {
             switch_state(FrameParserState::parsing_address, __LINE__);
-            return std::nullopt;
-        } else {
-            switch_state(FrameParserState::parsing_leader, __LINE__);
-            fmt::print(fmt::fg(fmt::color::red), "input: {}({})\n",
-                       (int)input.level, (int)input.last_state_duration_cnt);
-            return std::nullopt;
         }
     }
     return std::nullopt;
@@ -195,7 +190,7 @@ FrameParser::Output FrameParser::parse_command(Input input) {
         auto [low_bytes, high_bytes] =
             std::pair<uint8_t, uint8_t>(command_ & 0xff, command_ >> 8);
 
-        if (low_bytes != ~high_bytes) {
+        if ((low_bytes & high_bytes) != 0) {
             fmt::print(fmt::fg(fmt::color::red),
                        "command error: low_bytes:{}, high_bytes:{}\n",
                        low_bytes, high_bytes);
